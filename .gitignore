@@ -1,0 +1,19 @@
+﻿# Pastas do Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build
+bin/
+obj/
+
+# Logs
+*.log
+
+# Temporários
+*.tmp
+*.cache
+
+# Testes e pacotes
+TestResults/
+packages/

@@ -1,0 +1,6 @@
+@GameDeals_HostAddress = http://localhost:5261
+
+GET {{GameDeals_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
