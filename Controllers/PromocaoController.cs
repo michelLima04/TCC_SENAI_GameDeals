@@ -4,6 +4,8 @@ using AppPromocoesGamer.API.Models;
 using AppPromocoesGamer.API.DTOs;
 using HtmlAgilityPack;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
 
 namespace AppPromocoesGamer.API.Controllers
 {
@@ -18,8 +20,9 @@ namespace AppPromocoesGamer.API.Controllers
             _context = context;
         }
 
-        private async Task<(string titulo, string imagemUrl, decimal preco, string siteVendedor)> ExtrairDadosDaUrl(string url)
+        private async Task<(string titulo, string imagemUrl, decimal preco, string siteVendedor, List<string> falhas)> ExtrairDadosDaUrl(string url)
         {
+            var falhas = new List<string>();
             var httpClient = new HttpClient();
             httpClient.DefaultRequestHeaders.Add("User-Agent",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
@@ -28,42 +31,99 @@ namespace AppPromocoesGamer.API.Controllers
             var doc = new HtmlDocument();
             doc.LoadHtml(html);
 
-            var titulo = doc.DocumentNode.SelectSingleNode("//title")?.InnerText.Trim() ?? "Sem título";
-            var imagemUrl = doc.DocumentNode.SelectSingleNode("//meta[@property='og:image']")?.GetAttributeValue("content", "") ?? "";
-            var precoStr = doc.DocumentNode.SelectSingleNode("//meta[@property='product:price:amount']")?.GetAttributeValue("content", "") ?? "0";
+            // Extração do título
+            var tituloNode = doc.DocumentNode.SelectSingleNode("//title");
+            string titulo = tituloNode?.InnerText.Trim();
+            if (string.IsNullOrEmpty(titulo))
+            {
+                titulo = "Sem título";
+                falhas.Add("Título não encontrado na página.");
+            }
 
-            decimal.TryParse(precoStr.Replace(",", "."), out decimal preco);
+            // Extração da URL da imagem
+            var imagemNode = doc.DocumentNode.SelectSingleNode("//meta[@property='og:image']");
+            string imagemUrl = imagemNode?.GetAttributeValue("content", "");
+            if (string.IsNullOrEmpty(imagemUrl))
+            {
+                falhas.Add("URL da imagem (og:image) não encontrada na página.");
+            }
 
+            // Extração do preço
+            var precoNode = doc.DocumentNode.SelectSingleNode("//meta[@property='product:price:amount']");
+            string precoStr = precoNode?.GetAttributeValue("content", "");
+            if (!decimal.TryParse(precoStr.Replace(",", "."), out decimal preco))
+            {
+                preco = 0;
+                falhas.Add("Preço (product:price:amount) não encontrado ou inválido na página.");
+            }
+
+            // Extração do site vendedor
             Uri uri = new Uri(url);
             string siteVendedor = uri.Host.Replace("www.", "");
+            if (string.IsNullOrEmpty(siteVendedor))
+            {
+                falhas.Add("Não foi possível determinar o site vendedor a partir da URL.");
+            }
 
-            return (titulo, imagemUrl, preco, siteVendedor);
+            return (titulo, imagemUrl, preco, siteVendedor, falhas);
         }
 
         [HttpPost("Cadastrar promoção")]
+        [Authorize] // Requer autenticação para obter o usuário logado
         public async Task<IActionResult> PostPromocao([FromBody] PromocaoCreateDTO dto)
         {
             try
             {
-                var (titulo, imagemUrl, preco, siteVendedor) = await ExtrairDadosDaUrl(dto.UrlPromocao);
+                // Validação inicial da URL
+                if (string.IsNullOrWhiteSpace(dto.UrlPromocao))
+                {
+                    return BadRequest("A URL da promoção não pode estar vazia.");
+                }
+
+                if (!Uri.TryCreate(dto.UrlPromocao, UriKind.Absolute, out Uri uriResult) ||
+                    (uriResult.Scheme != Uri.UriSchemeHttp && uriResult.Scheme != Uri.UriSchemeHttps))
+                {
+                    return BadRequest("A URL fornecida não é válida. Use uma URL no formato http:// ou https://.");
+                }
+
+                // Obter o ID do usuário autenticado
+                var usuarioIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+                if (string.IsNullOrEmpty(usuarioIdClaim) || !int.TryParse(usuarioIdClaim, out int usuarioId))
+                {
+                    return Unauthorized("Usuário não autenticado ou ID inválido.");
+                }
+
+                // Extrair dados e verificar falhas
+                var (titulo, imagemUrl, preco, siteVendedor, falhas) = await ExtrairDadosDaUrl(dto.UrlPromocao);
 
                 var promocao = new Promocao
                 {
-                    UsuarioId = dto.UsuarioId,
-                    EmpresaId = dto.EmpresaId,
+                    UsuarioId = usuarioId,
+                    EmpresaId = null, // Pode ser ajustado se houver lógica para inferir
                     UrlPromocao = dto.UrlPromocao,
                     Titulo = titulo,
                     Preco = preco,
-                    Descricao = dto.Descricao,
+                    Descricao = null, // Pode ser preenchido depois, se necessário
                     SiteVendedor = siteVendedor,
                     TempoPostado = DateTime.Now.TimeOfDay,
-                    Cupom = dto.Cupom,
+                    Cupom = null, // Pode ser preenchido depois, se necessário
                     ImagemUrl = imagemUrl,
                     Aprovado = false // Só admin pode aprovar
                 };
 
                 _context.Promocoes.Add(promocao);
                 await _context.SaveChangesAsync();
+
+                // Se houver falhas, retornar um objeto com a promoção e as falhas
+                if (falhas.Any())
+                {
+                    return Ok(new
+                    {
+                        Promocao = promocao,
+                        Mensagem = "Promoção cadastrada, mas alguns dados não foram extraídos.",
+                        Falhas = falhas
+                    });
+                }
 
                 return Ok(promocao);
             }
@@ -114,7 +174,7 @@ namespace AppPromocoesGamer.API.Controllers
             var promocoes = _context.Promocoes
                 .Include(p => p.Usuario)
                 .Include(p => p.Empresa)
-                .Where(p => p.Aprovado == true) // apenas promoções aprovadas
+                .Where(p => p.Aprovado == true) // Apenas promoções aprovadas
                 .ToList();
 
             return Ok(promocoes);
